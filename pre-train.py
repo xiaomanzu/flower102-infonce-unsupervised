@@ -25,7 +25,6 @@ from test import NN, kNN
 parser = argparse.ArgumentParser(description='PyTorch flower102 Training')
 parser.add_argument('--lr', default=0.03, type=float, help='learning rate')
 parser.add_argument('--resume', '-r', default='', type=str, help='resume from checkpoint')
-parser.add_argument('--test-only', action='store_true', help='test only')
 parser.add_argument('--low-dim', default=102, type=int,
                     metavar='D', help='feature dimension')
 parser.add_argument('--nce-k', default=4096, type=int,
@@ -52,7 +51,7 @@ print('==> Preparing data..')
 
 data_dir = '/workspace/flower102/prepare_pic'
 train_dir = data_dir + '/train'
-test_dir = data_dir + '/valid'
+valid_dir = data_dir + '/valid'
 
 transform_train = transforms.Compose([transforms.RandomRotation(45),#随机旋转，-45到45度之间随机选
         transforms.CenterCrop(224),#从中心开始裁剪，留下224*224的。（随机裁剪得到的数据更多）
@@ -64,7 +63,7 @@ transform_train = transforms.Compose([transforms.RandomRotation(45),#随机旋�
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])#均值，标准差（拿人家算好的）
     ])
    
-transform_test=transforms.Compose([transforms.Resize(256),
+transform_valid=transforms.Compose([transforms.Resize(256),
         transforms.CenterCrop(224),
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]) #要和训练集保持一致的标准化操作
@@ -91,11 +90,10 @@ batch_size=256
 
 trainset = Flower102Instance(os.path.join(train_dir),transform=transform_train) 
 trainloader = DataLoader(trainset, shuffle=True, batch_size=batch_size, num_workers=2)
-testset = Flower102Instance(os.path.join(test_dir),transform=transform_test) 
-testloader = DataLoader(testset, shuffle=False, batch_size=batch_size, num_workers=2)
+validset = Flower102Instance(os.path.join(valid_dir),transform=transform_valid) 
+validloader = DataLoader(validset, shuffle=False, batch_size=batch_size, num_workers=2)
 ndata = trainset.__len__()
 
-print(ndata)
 scaler = torch.cuda.amp.GradScaler()
 print('==> Building model..')
 #使用resnet50的网络结构
@@ -116,19 +114,6 @@ if args.nce_k > 0:
 else:
     lemniscate = LinearAverage(args.low_dim, ndata, args.nce_t, args.nce_m)
     
-if args.test_only or len(args.resume)>0:
-    # Load checkpoint.
-    print('==> Resuming from checkpoint..')
-    assert os.path.isdir('checkpoint'), 'Error: no checkpoint directory found!'
-    checkpoint = torch.load('./checkpoint/'+args.resume)
-    model.load_state_dict(checkpoint['model'])
-    lemniscate = checkpoint['lemniscate']
-    best_acc = checkpoint['acc']
-    start_epoch = checkpoint['epoch']
-if device == 'cuda':
-    model = torch.nn.DataParallel(model, device_ids=range(torch.cuda.device_count()))
-    cudnn.benchmark = True
-
 
 # define loss function
 if hasattr(lemniscate, 'K'):
@@ -191,10 +176,7 @@ def train(trainloader, model, criterion, optimizer, epoch, args):
         loss.backward()
         # optimizer.step(): 使用 x.grad 来更新 x 的值。 例如: SGD 优化器执行以下操作: x += -lr * x.grad 
         optimizer.step()
-
-        
         # scaler.scale(loss).backward()
-      
         # scaler.step(optimizer) 
         # scaler.update()
         # measure elapsed time
@@ -213,7 +195,7 @@ for epoch in range(start_epoch, start_epoch+200):
     adjust_learning_rate(optimizer, epoch,args)
     train(trainloader, model, criterion, optimizer, epoch, args)
     if epoch%5==0:
-        acc = kNN(epoch, model, lemniscate, trainloader, testloader, 200, args.nce_t, 0)
+        acc = kNN(epoch, model, lemniscate, trainloader, validloader, 200, args.nce_t, 0)
         if acc > best_acc:
             print('Saving..')
             state = {

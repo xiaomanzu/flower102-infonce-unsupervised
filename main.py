@@ -28,10 +28,6 @@ model_names = sorted(name for name in torchvision.models.__dict__
 parser = argparse.ArgumentParser(description='PyTorch flower102 Training')
 parser.add_argument('--lr', default=0.06, type=float, help='learning rate')
 parser.add_argument('--resume', '-r', default='', type=str, help='resume from checkpoint')
-# parser.add_argument('--r', dest='resume',
-#                       help='resume checkpoint or not',
-#                       default=True, type=bool)
-parser.add_argument('--test-only', action='store_true', help='test only')
 parser.add_argument('--low-dim', default=128, type=int,
                     metavar='D', help='feature dimension')
 parser.add_argument('--nce-k', default=-1, type=int,
@@ -59,8 +55,6 @@ parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
                     help='model architecture: ' +
                         ' | '.join(model_names) +
                         ' (default: resnet50)')
-# parser.add_argument('-p', '--print-freq', default=10, type=int,
-#                     metavar='N', help='print frequency (default: 10)')
 
 args = parser.parse_args()
 scaler = torch.cuda.amp.GradScaler()
@@ -82,10 +76,10 @@ class Flower102Instance(datasets.ImageFolder):
             target = self.target_transform(target)
         return img,target,index
 # Data loading code
-# 把训练集和测试集放进来
 data_dir = '/workspace/flower102/prepare_pic'
 train_dir = data_dir + '/train'
 valid_dir = data_dir + '/valid'
+test_dir =data_dir +'/test'
 
 transform_train = transforms.Compose([transforms.RandomRotation(45),#随机旋转，-45到45度之间随机选
         transforms.CenterCrop(224),#从中心开始裁剪，留下224*224的。（随机裁剪得到的数据更多）
@@ -102,6 +96,12 @@ transform_valid=transforms.Compose([transforms.Resize(256),
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]) #要和训练集保持一致的标准化操作
     ])
+
+transform_test=transforms.Compose([transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]) #要和训练集保持一致的标准化操作
+    ])
     
 batch_size=256
 best_prec1=0
@@ -111,6 +111,8 @@ trainset = Flower102Instance(os.path.join(train_dir),transform=transform_train)
 trainloader = DataLoader(trainset, shuffle=True, batch_size=batch_size, num_workers=2)
 validset =Flower102Instance(os.path.join(valid_dir),transform=transform_valid) 
 validloader = DataLoader(validset, shuffle=False, batch_size=batch_size, num_workers=2)
+testset =Flower102Instance(os.path.join(test_dir),transform=transform_valid) 
+testloader = DataLoader(testset, shuffle=False, batch_size=batch_size, num_workers=2)
 ndata = trainset.__len__()  
 
 
@@ -123,22 +125,12 @@ model = torchvision.models.__dict__['resnet50'](128)
 # model = models.resnet50(pretrained=True)
 fc_inputs = model.fc.in_features
 model.fc=nn.Linear(fc_inputs, 102)
-# model.fc = nn.Sequential(
-#     nn.Linear(fc_inputs, 256),
-#     # nn.ReLU(),
-#     # nn.Dropout(0.4),
-#     # nn.Linear(256, 102)
-# )
-# model.fc.weight = nn.Parameter()
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 if device == 'cuda':
-    # model = torch.nn.DataParallel(model, device_ids=range(torch.cuda.device_count()))
     model=model.cuda()
     cudnn.benchmark = True
 model.to(device)
-# if isinstance(model,torch.nn.DataParallel):
-# 		model = model.module
 
 # define leminiscate
 if args.nce_k > 0:
@@ -153,18 +145,10 @@ else:
 
 lemniscate.to(device)
 criterion.to(device)
-# freeze all layers but the last fc
-# 冻结 Encoder 的参数不更新，而只更新最后分类器的参数
-    
+
 # optimize only the linear classifier
 # 只优化线性分类器# 优化器 optimizer 作用的参数为 parameters, 它只包含分类器 fc 的 weight 和 bias 这两部分
-# for layer in model.fc.modules():
-#     if isinstance(layer,nn.Linear):
-print(model.fc.parameters)
 optimizer = torch.optim.SGD(model.fc.parameters(), args.lr,momentum=0.9,weight_decay=5e-4)
-# parameters = list(filter(lambda p: p.requires_grad, layer.parameters()))
-# assert len(parameters) == 2  # fc.weight, fc.bias
-# optionally resume from a checkpoint
   
 # Load checkpoint.
 print('==> Resuming from checkpoint..')
@@ -177,14 +161,14 @@ start_epoch = 0
 print("=> loaded checkpoint '{}' (epoch {})"
     .format(args.resume, checkpoint['epoch']))
 
-
+# freeze all layers but the last fc
+# 冻结 Encoder 的参数不更新，而只更新最后分类器的参数
 for name, param in model.named_parameters():
     if name not in ['fc.weight', 'fc.bias']:	
         param.requires_grad = False
 model.fc.weight.data.normal_(mean=0.0, std=0.01)
 model.fc.bias.data.zero_()
 cudnn.benchmark = True
-
 
 def adjust_learning_rate(optimizer, epoch, args):
     """Decay the learning rate based on schedule"""
@@ -226,9 +210,8 @@ def train(trainloader,model, criterion, optimizer, epoch, args):
         features=features.to(device)
         loss = criterion(features, targets.cuda())
 
-        # acc1/acc5 are (K+1)-way contrast classifier accuracy
-        # measure accuracy and record loss
-        # Top-1/Top-5是针对于 K 种分类的准确度, 并会记录“对比损失”
+        
+        # record loss
         train_loss.update(loss.item(), inputs[0].size(0))	# inputs.size(0)表示图片数量
         
 
@@ -238,12 +221,8 @@ def train(trainloader,model, criterion, optimizer, epoch, args):
         optimizer.zero_grad()
         # loss.backward(): 为每个具有 require_grad = True 的参数 x 计算 d(loss) / dx。 d(...)/dx是对“...”求导的意思
         # 这些对于每个参数 x 都累积到 x.grad 中。 伪代码: x.grad + = d(loss) / dx
-        # loss.backward()
-        # optimizer.step(): 使用 x.grad 来更新 x 的值。 例如: SGD 优化器执行以下操作: x += -lr * x.grad 
-        # optimizer.step()
-
         scaler.scale(loss).backward()
-      
+        # optimizer.step(): 使用 x.grad 来更新 x 的值。 例如: SGD 优化器执行以下操作: x += -lr * x.grad 
         scaler.step(optimizer) 
         scaler.update()
         # measure elapsed time
@@ -268,8 +247,8 @@ for epoch in range(args.start_epoch, args.epochs):
         train(trainloader, model, criterion, optimizer, epoch,args)
 
         # evaluate on validation set
-        prec1 = Test(epoch, model, validloader)
-
+        # prec1 = Test(epoch, model, validloader)
+        prec1=Test(epoch,model,testloader)
         # remember best prec@1 and save checkpoint
         is_best = prec1 > best_prec1
         best_prec1 = max(prec1, best_prec1)
